@@ -49,8 +49,30 @@ public class HeapFile implements GlobalConst {
    */
   public HeapFile(String name) {
 
-	  throw new UnsupportedOperationException("Not implemented");
-
+      PageId pId = Minibase.DiskManager.get_file_entry(name);
+      this.fileName = name;
+      this.isTemp = false;
+      if(pId != null) //Heapfile was already in the file library
+      {
+          this.headId = pId; //Set this page id to be the page id of the located file
+      }
+      else //File was not in the file library
+      {
+          this.headId = Minibase.DiskManager.allocate_page();
+          DirPage DirHead = new DirPage();
+          Minibase.BufferManager.pinPage(this.headId, DirHead, GlobalConst.PIN_MEMCPY);
+          DirHead.setCurPage(this.headId);
+          DirHead.setType(DIR_PAGE);
+          Minibase.BufferManager.unpinPage(this.headId, true);
+          if(this.fileName != null)//Not a temp file, so add it to the file library
+          {
+              Minibase.DiskManager.add_file_entry(this.fileName, this.headId);
+          }
+          else
+          {
+              this.isTemp = true;
+          }
+      }
   } // public HeapFile(String name)
 
   /**
@@ -59,7 +81,10 @@ public class HeapFile implements GlobalConst {
    */
   protected void finalize() throws Throwable {
 
-	    throw new UnsupportedOperationException("Not implemented");
+	    if(this.isTemp)
+	    {
+            deleteFile();
+        }
 
   } // protected void finalize() throws Throwable
 
@@ -86,7 +111,83 @@ public class HeapFile implements GlobalConst {
    */
   public RID insertRecord(byte[] record) {
 
-	 throw new UnsupportedOperationException("Not implemented");
+      short numEntries = 0;
+      short newRecCnt = 0;
+      DataPage data = new DataPage();
+      PageId dataPID = new PageId();
+      int recLen = record.length;
+      RID newRid = new RID();
+      if(record.length > GlobalConst.PAGE_SIZE)
+      {
+          throw new IllegalArgumentException("Record is too large to fit on one page");
+      }
+      DirPage directory = new DirPage();
+      PageId nextPage = this.headId;
+      while(nextPage.pid != -1) //start with first directory page and find the first data page with enough free space
+      {
+          Minibase.BufferManager.pinPage(nextPage, directory, GlobalConst.PIN_DISKIO);
+          numEntries = directory.getEntryCnt();
+          for(int i = 0; i < numEntries; ++i)//search for first entry with enough free space
+          {
+              if(directory.getFreeCnt(i) > recLen + directory.SLOT_SIZE) //We can add at this data page
+              {
+                  dataPID = directory.getPageId(i);
+                  Minibase.BufferManager.pinPage(dataPID, data, GlobalConst.PIN_DISKIO);
+                  newRid = data.insertRecord(record);
+                  directory.setFreeCnt(i, data.getFreeSpace());
+                  newRecCnt = directory.getRecCnt(i);
+                  newRecCnt += 1;
+                  directory.setRecCnt(i, newRecCnt);
+                  Minibase.BufferManager.unpinPage(dataPID, true);
+                  Minibase.BufferManager.unpinPage(nextPage, true);
+                  return newRid;
+              }
+          }
+          if(numEntries < directory.MAX_ENTRIES) //Room to create a new data page at numEntries + 1
+          {
+              dataPID = Minibase.DiskManager.allocate_page();
+              Minibase.BufferManager.pinPage(dataPID, data, GlobalConst.PIN_MEMCPY);
+              data.setCurPage(dataPID);
+              numEntries += 1;
+              directory.setEntryCnt(numEntries);
+              directory.setPageId(numEntries -1, dataPID);//slots start at 0
+              newRid = data.insertRecord(record);
+              newRecCnt = directory.getRecCnt(numEntries -1);
+              newRecCnt += 1;
+              directory.setRecCnt(numEntries -1, newRecCnt);
+              directory.setFreeCnt(numEntries -1, data.getFreeSpace());
+              Minibase.BufferManager.unpinPage(dataPID, true);
+              Minibase.BufferManager.unpinPage(nextPage, true);
+              return newRid;
+          }
+          //If no room to add a data page, attempt to go to the next directory page
+          Minibase.BufferManager.unpinPage(nextPage, false);
+          nextPage = directory.getNextPage();
+      }
+      //If made it to end of the directory pages without inserting record, add a new directory page
+      nextPage = directory.getCurPage(); //Get the page id of the last directory page in the linked list
+      Minibase.BufferManager.pinPage(nextPage, directory, GlobalConst.PIN_DISKIO); //Pin the page again
+      nextPage = Minibase.DiskManager.allocate_page();//allocate a page for our new directory page
+      directory.setNextPage(nextPage);//Add the new directory page to the end of the linked list
+      Minibase.BufferManager.unpinPage(directory.getCurPage(), true); //unpin
+      directory = new DirPage();
+      Minibase.BufferManager.pinPage(nextPage, directory, GlobalConst.PIN_MEMCPY); //Pin the new directory page
+      directory.setCurPage(nextPage);
+      //directory page is empty so allocate a new data page in slot 0
+      dataPID = Minibase.DiskManager.allocate_page();
+      Minibase.BufferManager.pinPage(dataPID, data, GlobalConst.PIN_MEMCPY);
+      data.setCurPage(dataPID);
+      numEntries = 1;
+      directory.setEntryCnt(numEntries);
+      directory.setPageId(0, dataPID);//slots start at 0
+      newRid = data.insertRecord(record);
+      directory.setFreeCnt(0, data.getFreeSpace());
+      newRecCnt = 1; //First record on this page
+      directory.setRecCnt(0, newRecCnt);
+      Minibase.BufferManager.unpinPage(dataPID, true);
+      Minibase.BufferManager.unpinPage(nextPage, true);
+      return newRid;
+
    } // public RID insertRecord(byte[] record)
 
   /**
@@ -95,8 +196,21 @@ public class HeapFile implements GlobalConst {
    * @throws IllegalArgumentException if the rid is invalid
    */
   public byte[] selectRecord(RID rid) {
+      PageId dataPID= rid.pageno;
+      DataPage dataPage = new DataPage();
+      byte[] record;
 
-	    throw new UnsupportedOperationException("Not implemented");
+      Minibase.BufferManager.pinPage(dataPID, dataPage, GlobalConst.PIN_DISKIO);
+      try {
+          record = dataPage.selectRecord(rid);
+      }catch (Exception e)
+      {
+          Minibase.BufferManager.unpinPage(dataPID, false);
+          throw new IllegalArgumentException("Invalid RID");
+      }
+      Minibase.BufferManager.unpinPage(dataPID, false); //not dirty, only reading
+
+      return record;
 
   } // public byte[] selectRecord(RID rid)
 
@@ -128,8 +242,21 @@ public class HeapFile implements GlobalConst {
    */
   public int getRecCnt() {
 
-	    throw new UnsupportedOperationException("Not implemented");
+	    int count = 0;
+	    PageId nextPage = this.headId;
+	    DirPage current = new DirPage();
 
+	    while(nextPage.pid != -1)
+        {
+            Minibase.BufferManager.pinPage(nextPage, current, GlobalConst.PIN_DISKIO);
+            for(int i = 0; i < current.MAX_ENTRIES; ++i)
+            {
+                count += current.getRecCnt(i);
+            }
+            Minibase.BufferManager.unpinPage(nextPage, false);
+            nextPage = current.getNextPage();
+        }
+        return count;
   } // public int getRecCnt()
 
   /**
