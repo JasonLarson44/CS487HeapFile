@@ -220,8 +220,19 @@ public class HeapFile implements GlobalConst {
    * @throws IllegalArgumentException if the rid or new record is invalid
    */
   public void updateRecord(RID rid, byte[] newRecord) {
+      PageId dataPID= rid.pageno;
+      DataPage dataPage = new DataPage();
 
-	    throw new UnsupportedOperationException("Not implemented");
+      Minibase.BufferManager.pinPage(dataPID, dataPage, GlobalConst.PIN_DISKIO);
+      try {
+          dataPage.updateRecord(rid, newRecord);
+      }catch (Exception e)
+      {
+          Minibase.BufferManager.unpinPage(dataPID, UNPIN_DIRTY);
+          throw new IllegalArgumentException("Invalid RID or new record");
+      }
+      Minibase.BufferManager.unpinPage(dataPID, UNPIN_DIRTY); //not dirty, only reading
+
 
   } // public void updateRecord(RID rid, byte[] newRecord)
 
